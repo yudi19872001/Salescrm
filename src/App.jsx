@@ -414,23 +414,36 @@ function CRM({user,onLogout,roles,permSets,setPermSets,users,setUsers,onSaveRole
   const closeModal=()=>{setModal(null);setForm({});setEditTarget(null);};
   const setF=(k,v)=>setForm(f=>({...f,[k]:v}));
 
+  // Walks up the manager chain from the quote owner.
+  // Adds each manager that has `approveQuotes`. Stops (does NOT add) at the first
+  // user with `finalApprove` — that role is the escalation backstop, not a default
+  // step in every approval. Skips the owner themselves.
   const buildApprovalChain=(ownerUserId)=>{
     const chain=[];
     const visited=new Set();
-    let curId=ownerUserId;
+    const owner=users.find(x=>x.id===ownerUserId);
+    let curId=owner?owner.managerId:null;   // start from owner's manager, not the owner
     let depth=0;
     while(curId&&depth<10){
       const u=users.find(x=>x.id===curId);
       if(!u||visited.has(u.id))break;
       visited.add(u.id);
       const p=permSets[u.roleId]||{};
-      if(p.approveQuotes||p.finalApprove){
+      if(p.finalApprove)break;              // chain stops at finalApprover (excluded)
+      if(p.approveQuotes){
         chain.push({userId:u.id,role:u.roleId,user:u.name,status:"Pending",date:"",remark:""});
       }
       curId=u.managerId;
       depth++;
     }
     return chain;
+  };
+
+  // Sequential gate: returns true only if this user is the NEXT pending approver
+  // on the quote. Used everywhere we previously used `approvals.some(...)`.
+  const isMyTurn=(q)=>{
+    const next=q.approvals?.find(a=>a.status==="Pending");
+    return !!(next&&next.userId===user.id);
   };
 
   const saveItem=()=>{
@@ -478,8 +491,9 @@ function CRM({user,onLogout,roles,permSets,setPermSets,users,setUsers,onSaveRole
     setQuotes(prev=>{
       const updated=prev.map(q=>{
         if(q.id!==quoteId)return q;
-        const idx=q.approvals.findIndex(a=>a.status==="Pending"&&a.userId===user.id);
-        if(idx===-1)return q;
+        // Only the next-pending approver can act, and only on their entry.
+        const idx=q.approvals.findIndex(a=>a.status==="Pending");
+        if(idx===-1||q.approvals[idx].userId!==user.id)return q;
         const newApprovals=q.approvals.map((a,i)=>
           i===idx?{...a,status:decision,date:today,remark:remarkText}:a
         );
@@ -503,7 +517,7 @@ function CRM({user,onLogout,roles,permSets,setPermSets,users,setUsers,onSaveRole
   const won=mOpps.filter(o=>o.stage==="Closed Won").reduce((s,o)=>s+o.value,0);
   const stageData=STAGES.slice(0,4).map(s=>({stage:s,val:mOpps.filter(o=>o.stage===s).reduce((a,b)=>a+b.value,0)}));
   const maxVal=Math.max(...stageData.map(s=>s.val),1);
-  const pendingApproval=quotes.filter(q=>q.status==="Pending Approval"&&q.approvals?.some(a=>a.status==="Pending"&&a.userId===user.id)).length;
+  const pendingApproval=quotes.filter(q=>q.status==="Pending Approval"&&isMyTurn(q)).length;
   const safeTab=tabs.includes(tab)?tab:tabs[0];
 
   const repByUser=useMemo(()=>{const map={};opps.forEach(o=>{if(!map[o.owner])map[o.owner]={name:o.owner,total:0,won:0,count:0};map[o.owner].total+=o.value;map[o.owner].count++;if(o.stage==="Closed Won")map[o.owner].won+=o.value;});return Object.values(map);},[opps]);
@@ -671,7 +685,7 @@ function CRM({user,onLogout,roles,permSets,setPermSets,users,setUsers,onSaveRole
             {sf(mQuotes,["name","quoteNo","lead","opportunity"]).map(q=>{
               const sym=currSym(q.currency);
               const total=q.items.reduce((s,it)=>s+(+it.finalPrice||0),0);
-              const myPending=q.approvals?.some(a=>a.status==="Pending"&&a.userId===user.id);
+              const myPending=isMyTurn(q);
               return <div key={q.id} style={card} onClick={()=>setDetail({type:"quote",data:q})}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:8}}>
                   <div>
@@ -854,7 +868,7 @@ function CRM({user,onLogout,roles,permSets,setPermSets,users,setUsers,onSaveRole
               {a.remark&&<div style={{fontSize:11,marginTop:4,fontStyle:"italic",color:"#5a3abf"}}>"{a.remark}"</div>}
             </div>)}
 
-            {liveQuoteDetail.approvals?.some(a=>a.status==="Pending"&&a.userId===user.id)&&<div style={{display:"flex",gap:6,marginTop:14}}>
+            {isMyTurn(liveQuoteDetail)&&<div style={{display:"flex",gap:6,marginTop:14}}>
               <button onClick={()=>openApprovalModal(liveQuoteDetail.id,"Approved")} style={{flex:1,padding:"8px",borderRadius:8,border:"none",background:"#c0dd97",color:"#1a5c30",fontWeight:700,cursor:"pointer"}}>Approve</button>
               <button onClick={()=>openApprovalModal(liveQuoteDetail.id,"Rejected")} style={{flex:1,padding:"8px",borderRadius:8,border:"none",background:"#f7c1c1",color:"#b91c1c",fontWeight:700,cursor:"pointer"}}>Reject</button>
             </div>}
